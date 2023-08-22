@@ -1,0 +1,111 @@
+name: Release [test]
+
+# Tests the release pipeline upon changes to any relevant files :)
+on:
+  push:
+    paths:
+      - .github/scripts/release/*
+      - .github/scripts/release-test/*
+      - .github/workflows/release.yaml
+      - .github/workflows/release-test.yaml
+
+permissions:
+  contents: write
+
+jobs:
+  # Cleans up releases for testing purposes :)
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      commit1: ${{ steps.commits.outputs.commit1 }}
+      commit2: ${{ steps.commits.outputs.commit2 }}
+      commit3: ${{ steps.commits.outputs.commit3 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Deleting test releases
+        uses: dev-drprasad/delete-older-releases@v0.2.1
+        with:
+          keep_latest: 0
+          delete_tag_pattern: release-test
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Deleting test branches
+        uses: actions/github-script@v6
+        env:
+          TEST_BRANCH_PREFIX: release/release-test-
+        with:
+          script: await require('.github/scripts/release-test/delete-test-branches')({github, context})
+
+      - name: Getting last commits
+        id: commits
+        uses: actions/github-script@v6
+        with:
+          script: await require('.github/scripts/release-test/get-last-commits')({github, context, core})
+        
+        
+
+  ok_no_filters:
+    needs: setup
+    uses: ./.github/workflows/release.yaml
+    with:
+      tag_prefix: release-test-ok-no-filters-
+      target_commitish: ${{ needs.setup.outputs.commit1 }} # We need this because we need commits between releases
+    secrets:
+      GH_TOKEN_READ_ALL_REPOS: ${{ secrets.GITHUB_TOKEN }}
+
+  ok_no_filters_increment:
+    needs: 
+      - setup
+      - ok_no_filters
+    uses: ./.github/workflows/release.yaml
+    with:
+      tag_prefix: release-test-ok-no-filters-
+      target_commitish: ${{ needs.setup.outputs.commit2 }}
+    secrets:
+      GH_TOKEN_READ_ALL_REPOS: ${{ secrets.GITHUB_TOKEN }}
+
+  # ok_filters:
+  #   needs: setup
+  #   uses: ./.github/workflows/release.yaml
+  #   with:
+  #     tag_prefix: release-test-ok-filters-
+  #     target_commitish: ${{ needs.setup.outputs.commit3 }} # We need this because we need commits between releases
+  #     schedule_filter_type: EVERY_3_WEEKS
+  #     recency_filter_type: WEEK
+  #   secrets:
+  #     GH_TOKEN_READ_ALL_REPOS: ${{ secrets.GITHUB_TOKEN }}
+      
+  # Verifies tests are okay :)
+  assert:
+    needs: 
+      - ok_no_filters
+      - ok_no_filters_increment
+      # - ok_filters
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: assert_ok_no_filters
+        uses: actions/github-script@v6
+        env:
+          RELEASE_TAG: release-test-ok-no-filters-0.1.0
+        with:
+          script: await require('.github/scripts/release-test/assert-release-exists')({github, context, core})
+
+      - name: assert_ok_no_filters_increment
+        uses: actions/github-script@v6
+        env:
+          RELEASE_TAG: release-test-ok-no-filters-0.2.0
+        with:
+          script: await require('.github/scripts/release-test/assert-release-exists')({github, context, core})
+
+      # - name: assert_ok_filters
+      #   uses: actions/github-script@v6
+      #   env:
+      #     RELEASE_TAG: release-test-ok-filters-0.1.0
+      #   with:
+      #     script: await require('.github/scripts/release-test/assert-release-exists')({github, context, core})

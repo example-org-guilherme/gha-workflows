@@ -1,0 +1,140 @@
+name: Release
+
+
+on:
+  workflow_call:
+    inputs:
+      tag_prefix:
+        type: string
+        description: What prefix to use when creating tags
+        default: ''
+    
+      branch_prefix:
+        type: string
+        description: What prefix to use when creating release branches
+        default: release/
+
+      target_commitish:
+        type: string
+        description: Commitish value that determines where the Git tag is created from. Can be any branch or commit SHA. Defaults to repository default branch.
+
+      schedule_filter_type: 
+        type: string
+        description: |
+          Optionally execute a release only on a given schedule filter (ex every 3 weeks)
+
+          Options: EVERY_3_WEEKS, NONE
+        default: NONE
+
+      recency_filter_type:
+        type: string
+        description: |
+          Optionally execute a release only if there hasn't been a release in a given timespan
+
+          Options: WEEK, NONE
+        default: NONE
+
+    outputs:
+      tag: 
+        description: Tag in the X.Y.Z format that was used to release
+        value: 
+    
+    secrets:
+      GH_TOKEN_READ_ALL_REPOS:
+        required: true
+
+
+env:
+  REPOSITORY_BASE_URL: ${{ github.server_url }}/${{ github.repository }}
+  BRANCH_PREFIX: ${{ inputs.branch_prefix || 'release/' }}
+  INPUTS: ${{ toJson(inputs) }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.version_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # Needed as per https://github.com/marketplace/actions/git-semantic-version#important-note-regarding-the-checkout-action
+
+      # Needed to use the script files within this workflow (because the default checkout is made on the executing repository's files)
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          repository: elevate-labs-with-guilherme/gha-workflows
+          path: gha-workflows
+          token: ${{ secrets.GH_TOKEN_READ_ALL_REPOS}}
+      
+      # Optionally checks the schedule to see if it's okay to create a release now :)
+      - name: Checking schedule to automated release
+        if: inputs.schedule_filter_type != 'NONE'
+        uses: actions/github-script@v6
+        with:
+          script: await require('./gha-workflows/.github/scripts/release/check-schedule-filter')({core})
+
+      # Optionally checks if there has already been a release today and stops the execution if so
+      - name: Checking if there's already been a release recent enough
+        uses: actions/github-script@v6
+        if: inputs.recency_filter_type != 'NONE'
+        with:
+          script: await require('./gha-workflows/.github/scripts/release/check-recency-filter')({core, github, context})
+          result-encoding: string
+
+      - name: Calculate next version
+        id: version
+        uses: paulhatch/semantic-version@v5.1.0
+        with:
+          # The prefix to use to identify tags
+          tag_prefix: ${{ inputs.tag_prefix }}
+          minor_pattern: "/./" # Match anything to bump minor version, otherwise it will bump patch
+          # A string to determine the format of the version output
+          version_format: "${major}.${minor}.${patch}"
+
+      - name: Validate and broadcast next version
+        run: |
+          (
+            if [[ -z "$VERSION" ]]; then
+              echo "Could not calculate next version :(. Please check the logs!"
+              exit 1
+            fi
+            echo "🔮 Next release version is **$VERSION**, from commit **[$COMMIT]($REPOSITORY_BASE_URL/commit/$COMMIT)**. Previous version is: **$PREVIOUS_VERSION**"
+          ) | tee $GITHUB_STEP_SUMMARY
+        env:
+          VERSION: ${{ steps.version.outputs.version_tag }}
+          PREVIOUS_VERSION: ${{ steps.version.outputs.previous_version || 'n/a' }}
+          COMMIT: ${{ inputs.target_commitish || steps.version.outputs.current_commit }}
+
+      - name: Create release branch
+        uses: peterjgrainger/action-create-branch@v2.3.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          branch: ${{ env.BRANCH_PREFIX }}${{ steps.version.outputs.version_tag }}
+          # sha: ${{ inputs.target_commitish }} # TODO - fix this, make sure we can use target commitish -- cant currently because this token doesnt ahve enough privileges in case there's some change in actions
+
+      - name: Create release and tag
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version_tag }}
+          draft: false
+          prerelease: false
+          target_commitish: ${{ inputs.target_commitish}}
+          body: |
+            🤖 Automatic release for version **${{ steps.version.outputs.version_tag }}**
+
+      - name: Broadcast release and branch URLs
+        run: |
+          cat <<EOD >  $GITHUB_STEP_SUMMARY
+          🎀 Release **[$VERSION]($REPOSITORY_BASE_URL/releases/tag/$VERSION)** created!
+
+          🔀 Branch **[$BRANCH_PREFIX$VERSION]($REPOSITORY_BASE_URL/tree/$BRANCH_PREFIX$VERSION)** created!
+          EOD
+        env:
+          VERSION: ${{ steps.version.outputs.version_tag }}
+          PREVIOUS_VERSION: ${{ steps.version.outputs.previous_version || 'n/a' }}
+          COMMIT: ${{ inputs.target_commitish || steps.version.outputs.current_commit }}

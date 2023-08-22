@@ -1,0 +1,138 @@
+name: Update Submodules
+
+permissions:
+  contents: write 
+  pull-requests: write
+
+on: 
+  workflow_call:
+    inputs:
+      branch:
+        type: string
+        description: What name to use for the update branch?
+        default: chore/auto-submodules-update
+      # as documented here: https://github.com/marketplace/actions/create-pull-request#action-inputs
+      reviewers: 
+        type: string
+        description: A comma or newline-separated list of reviewers (GitHub usernames) to request a review from.
+      team-reviewers:
+        type: string
+        description: A comma or newline-separated list of GitHub teams to request a review from. Note that a repo scoped PAT, or equivalent GitHub App permissions, are required.
+
+    secrets:
+      GH_TOKEN_READ_ALL_REPOS:
+        required: true
+
+env:
+  BRANCH_NAME: ${{ inputs.branch || 'chore/auto-update-submodules' }}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GH_TOKEN_READ_ALL_REPOS }}
+          submodules: true
+
+      - uses: fregante/setup-git-user@v2
+
+      # TODO define which strategy is best checkout/rebase/merge
+      - name: Updating all submodules
+        id: update
+        run: |
+          status_before_file=$(mktemp)
+          status_after_file=$(mktemp)
+          changed_modules_file=$(mktemp)
+
+          git config -f .git/config http."https://github.com/".extraheader | cut -c1-30
+          git config -f .git/config http."https://github.com/".extraheader | cut -c30-
+
+          echo "Status before update :)"
+          git submodule status | tee $status_before_file
+
+          # No submodules!
+          if [ ! -s $status_before_file ]; then
+            echo "🔎 No submodules detected! Skipping :)" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Initialize and update submodules :)
+          git submodule update --init --remote
+          git add .
+          git commit -m "chore: automatically updating all submodules" || echo
+
+          echo "Status after update"
+          git submodule status | tee $status_after_file
+
+          set +e
+          echo "Changed modules: "
+          cat $status_after_file \
+            | grep -v -f <(cat $status_before_file | perl -pe 's/.(\S+).*/$1/') \
+            | perl -pe 's/.(\S+)\s+(\S+).*/$2/' \
+            | tee $changed_modules_file
+
+
+          # Obtain SHA for current HEAD + main HEAD
+          main_head=$(git checkout HEAD^1 &>/dev/null && git rev-parse HEAD)
+          branch_head=$(git checkout - &>/dev/null  && git rev-parse HEAD)
+          set -e
+
+          # Summarizing execution :)
+          if [[ -z $main_head ]] || [[ $main_head = $branch_head ]]; then
+            echo "🍃 No submodules to update at this time!" >> $GITHUB_STEP_SUMMARY
+          else
+            cat <<EOD >> $GITHUB_STEP_SUMMARY
+
+          📙 Updating these submodules:
+
+          \`\`\`
+          $(cat $status_before_file | grep -f $changed_modules_file)
+          \`\`\`
+
+          🪄 To these versions:
+
+          \`\`\`
+          $(cat $status_after_file | grep -f $changed_modules_file)
+          \`\`\`
+          EOD
+          fi
+
+          # Defining parameters
+          cat <<EOD >> $GITHUB_OUTPUT
+          changed_submodules<<EOF
+          $(cat $changed_modules_file)
+          EOF
+
+          submodules_versions<<EOF
+          $(cat $status_after_file | grep -f $changed_modules_file)
+          EOF
+
+          previous_versions<<EOF
+          $(cat $status_before_file | grep -f $changed_modules_file)
+          EOF
+
+          EOD
+      
+      - name: Opening PR for submodules update if needed
+        uses: peter-evans/create-pull-request@v5.0.2
+        if: steps.update.outputs.changed_submodules != ''
+        with:
+          branch: ${{ env.BRANCH_NAME}}
+          title: 🤖 Submodules Update
+          reviewers: ${{ inputs.reviewers }}
+          team-reviewers: ${{ inputs.team-reviewers }}
+          body: |
+            🤖 Automatically updating all submodule(s) in this repository to their latest versions:
+
+            ```
+            ${{ steps.update.outputs.submodules_versions}}
+            ```
+
+            Previous versions:
+
+            ```
+            ${{ steps.update.outputs.previous_versions}}
+            ```
+          
